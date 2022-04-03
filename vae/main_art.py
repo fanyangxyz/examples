@@ -15,11 +15,14 @@ from matplotlib import pyplot as plt
 parser = argparse.ArgumentParser(description='VAE Example')
 parser.add_argument('--train_dir', type=str, default=None)
 parser.add_argument('--test_dir', type=str, default=None)
+parser.add_argument('--use_fake_data', type=int, default=0)
 parser.add_argument('--width', type=int, default=32)
 parser.add_argument('--height', type=int, default=32)
+parser.add_argument('--num_channel', type=int, default=3)
 parser.add_argument('--hdim', type=int, default=32)
 parser.add_argument('--ldim', type=int, default=8)
-parser.add_argument('--lr', type=float, default=1e-3)
+parser.add_argument('--use_mse_loss', type=int, default=1)
+parser.add_argument('--lr', type=float, default=1e-4)
 parser.add_argument('--batch_size', type=int, default=16, metavar='N',
                     help='input batch size for training (default: 16)')
 parser.add_argument('--epochs', type=int, default=10, metavar='N',
@@ -44,17 +47,37 @@ device = torch.device("cuda" if args.cuda else "cpu")
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 
 
+def create_fake_data():
+    eye_color = 1 if np.random.random() > 0.5 else 0
+    img = np.stack([eye_color * np.eye(args.width)
+                   for _ in range(args.num_channel)], axis=-1)
+    assert img.shape == (args.width, args.width, args.num_channel)
+    noise = np.random.normal(0, 1, (args.width, args.height, args.num_channel))
+    img += noise
+    img = np.reshape(img, (args.width, args.width, args.num_channel))
+
+    return img.astype(np.float32)
+
+
+def collect_image_paths(img_dir):
+    paths = list(os.listdir(img_dir))
+    paths = [path for path in paths if path.endswith('jpg')]
+    return sorted(paths)
+
+
 class CustomImageDataset(torch.utils.data.Dataset):
     def __init__(
             self,
             annotations_file,
             img_dir,
+            use_fake_data=False,
             transform=None,
             target_transform=None):
         self.img_dir = img_dir
-        self.img_paths = sorted(list(os.listdir(self.img_dir)))
+        self.img_paths = collect_image_paths(self.img_dir)
         self.num_imgs = len(self.img_paths)
-        print(f'{self.num_imgs} in {self.img_dir}')
+        if not args.use_fake_data:
+            print(f'{self.num_imgs} in {self.img_dir}')
         self.img_labels = [0] * self.num_imgs
         self.transform = transform
         self.target_transform = target_transform
@@ -63,12 +86,23 @@ class CustomImageDataset(torch.utils.data.Dataset):
         return len(self.img_labels)
 
     def _read_image(self, img_path):
-        img = cv2.resize(
-            cv2.imread(img_path),
-            (args.width,
-             args.height),
-            interpolation=cv2.INTER_CUBIC)
-        img = img.astype(np.float32) / 255.
+        if args.use_fake_data:
+            img = create_fake_data()
+        else:
+            try:
+                img = cv2.resize(
+                    cv2.imread(img_path),
+                    (args.width,
+                     args.height),
+                    interpolation=cv2.INTER_CUBIC)
+                img = img.astype(np.float32) / 255.
+            except Exception as e:
+                print(f'Cannot get {img_path} because of {e}')
+                img = np.ones(
+                    (args.width,
+                     args.height,
+                     args.num_channel),
+                    dtype=np.float32)
         return torch.from_numpy(img)
 
     def __getitem__(self, idx):
@@ -86,14 +120,16 @@ class CustomImageDataset(torch.utils.data.Dataset):
 train_loader = torch.utils.data.DataLoader(
     CustomImageDataset(
         None,
-        args.train_dir),
+        args.train_dir,
+        use_fake_data=args.use_fake_data),
     batch_size=args.batch_size,
     shuffle=True,
     **kwargs)
 test_loader = torch.utils.data.DataLoader(
     CustomImageDataset(
         None,
-        args.test_dir),
+        args.test_dir,
+        use_fake_data=args.use_fake_data),
     batch_size=args.batch_size,
     shuffle=True,
     **kwargs)
@@ -103,7 +139,7 @@ class VAE(nn.Module):
     def __init__(self):
         super(VAE, self).__init__()
 
-        self.input_size = args.width * args.height * 3
+        self.input_size = args.width * args.height * args.num_channel
         self.fc1 = nn.Linear(self.input_size, args.hdim)
         self.fc21 = nn.Linear(args.hdim, args.ldim)
         self.fc22 = nn.Linear(args.hdim, args.ldim)
@@ -135,16 +171,25 @@ optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
 # Reconstruction + KL divergence losses summed over all elements and batch
 def loss_function(recon_x, x, mu, logvar):
-    BCE = F.binary_cross_entropy(
-        recon_x, x.view(-1, args.width * args.height * 3), reduction='sum')
-
+    if args.num_channel == 1:
+        loss = F.binary_cross_entropy(
+            recon_x, x.view(-1, args.width * args.height * args.num_channel), reduction='sum')
+    else:
+        if args.use_mse_loss:
+            loss = F.mse_loss(recon_x, x.view(-1, args.width *
+                              args.height * args.num_channel), reduction='sum')
+        else:
+            loss = F.cross_entropy(recon_x,
+                                   x.view(-1,
+                                          args.width * args.height * args.num_channel),
+                                   reduction='mean')
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-    return BCE + KLD
+    return loss + KLD
 
 
 def train(epoch):
@@ -159,6 +204,7 @@ def train(epoch):
         train_loss += loss.item()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
+            continue
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader),
@@ -179,7 +225,7 @@ def test(epoch):
             if i == 0:
                 n = min(data.size(0), 8)
                 comparison = torch.cat([data[:n], recon_batch.view(
-                    data.size(0), args.width, args.height, 3)[:n]])
+                    data.size(0), args.width, args.height, args.num_channel)[:n]])
                 save_image(
                     comparison.numpy(),
                     2,
@@ -190,6 +236,8 @@ def test(epoch):
 
 
 def save_image(sample, nrow, name):
+    assert sample.dtype == 'float32', sample.dtype
+    sample = np.clip(sample, 0, 1)
     ncol = len(sample) // nrow
     fig, axes = plt.subplots(nrow, ncol)
     for i, ax in enumerate(axes.flat):
@@ -207,5 +255,5 @@ if __name__ == "__main__":
         with torch.no_grad():
             sample = torch.randn(16, args.ldim).to(device)
             sample = model.decode(sample).cpu()
-            sample = sample.view(16, args.width, args.height, 3)
+            sample = sample.view(16, args.width, args.height, args.num_channel)
             save_image(sample.numpy(), 4, f'results/sample_{epoch}')
