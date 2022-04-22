@@ -19,18 +19,16 @@ import draw_box
 
 FLAGS = gflags.FLAGS
 
-gflags.DEFINE_float('lr', '1e-4', '')
+gflags.DEFINE_float('lr', '1e-2', '')
 gflags.DEFINE_integer('batch_size', 24, '')
-gflags.DEFINE_integer('epochs', 10, '')
+gflags.DEFINE_integer('epochs', 30, '')
 gflags.DEFINE_integer('log_interval', 100, '')
 gflags.DEFINE_boolean('cuda', False, '')
 gflags.DEFINE_integer('seed', 33, '')
-gflags.DEFINE_integer('hdim', 32, '')
 gflags.DEFINE_integer('ldim', 16, '')
 
 
-BOX_SIZE = 25
-SQRT_BOX_SIZE = 5
+BOX_SIZE = 64
 
 
 class CustomImageDataset(torch.utils.data.Dataset):
@@ -55,23 +53,47 @@ class VAE(nn.Module):
     def __init__(self):
         super(VAE, self).__init__()
 
-        self.m1 = nn.Conv2d(3, 16, SQRT_BOX_SIZE, SQRT_BOX_SIZE, padding=9)
-        self.m2 = nn.Conv2d(16, 32, SQRT_BOX_SIZE, SQRT_BOX_SIZE)
-        self.fc1 = nn.LazyLinear(FLAGS.hdim)
-        self.fc21 = nn.LazyLinear(FLAGS.ldim)
-        self.fc22 = nn.LazyLinear(FLAGS.ldim)
-        self.fc3 = nn.LazyLinear(FLAGS.hdim)
-        self.fc4 = nn.LazyLinear(FLAGS.hdim)
-        self.n3 = nn.ConvTranspose2d(32, 16, SQRT_BOX_SIZE, SQRT_BOX_SIZE)
-        self.n4 = nn.ConvTranspose2d(16, 3, SQRT_BOX_SIZE, SQRT_BOX_SIZE)
+        self.encoder_model = nn.Sequential(
+            nn.Conv2d(
+                in_channels=3, out_channels=6, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
+                in_channels=6, out_channels=12, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
+                in_channels=12, out_channels=12, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
+                    in_channels=12, out_channels=FLAGS.ldim, kernel_size=3, stride=2), nn.ReLU(), )
+        self.fc_mu = nn.LazyLinear(FLAGS.ldim)
+        self.fc_logvar = nn.LazyLinear(FLAGS.ldim)
+
+        self.decoder_model = nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels=FLAGS.ldim,
+                out_channels=12,
+                kernel_size=3,
+                stride=4),
+            nn.ReLU(),
+            nn.ConvTranspose2d(
+                in_channels=12,
+                out_channels=6,
+                kernel_size=3,
+                stride=3),
+            nn.ReLU(),
+            nn.ConvTranspose2d(
+                in_channels=6,
+                out_channels=3,
+                kernel_size=3,
+                stride=3),
+            nn.ReLU(),
+            nn.ConvTranspose2d(
+                in_channels=3,
+                out_channels=3,
+                kernel_size=3,
+                stride=3),
+            nn.Sigmoid(),
+        )
 
     def encode(self, x):
-        x = x.permute(0, 3, 1, 2)
-        x = F.relu(self.m1(x))
-        x = F.relu(self.m2(x))
-        x = torch.flatten(x, start_dim=1)
-        h1 = F.relu(self.fc1(x))
-        return self.fc21(h1), self.fc22(h1)
+        x_ncwh = x.permute(0, 3, 1, 2)
+        h = self.encoder_model(x_ncwh)
+        h_mean = torch.mean(x, dim=(2, 3))
+        return self.fc_mu(h_mean), self.fc_logvar(h_mean)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -79,25 +101,22 @@ class VAE(nn.Module):
         return mu + eps * std
 
     def decode(self, z):
-        h3 = F.relu(self.fc3(z))
-        h4 = F.relu(self.fc4(h3))
-        x_hat = h4.view(-1, FLAGS.hdim, 1, 1)
-        x_hat = F.relu(self.n3(x_hat))
-        x_hat = torch.sigmoid(self.n4(x_hat))
-        return x_hat.permute(0, 2, 3, 1)
+        z = z.view(-1, FLAGS.ldim, 1, 1)
+        x_hat = self.decoder_model(z)
+        x_hat_nwhc = x_hat.permute(0, 2, 3, 1)
+        x_cropped = x_hat_nwhc[:, :BOX_SIZE, :BOX_SIZE, :]
+        return x_cropped
 
     def forward(self, x):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         x_hat = self.decode(z)
-        return torch.flatten(x_hat, start_dim=1), mu, logvar
+        return x_hat, mu, logvar
 
 
 # Reconstruction + KL divergence losses summed over all elements and batch
 def loss_function(recon_x, x, mu, logvar):
-    loss = F.binary_cross_entropy(
-        recon_x, x.view(
-            recon_x.shape), reduction='mean')
+    loss = F.binary_cross_entropy(recon_x, x, reduction='mean')
 
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
@@ -182,7 +201,7 @@ def main():
                     # the number of examples to visualize
                     n = min(data.size(0), 8)
                     comparison = torch.cat(
-                        [data[:n], recon_batch.view(data.shape)[:n]])
+                        [data[:n], recon_batch[:n]])
                     save_image(
                         comparison.numpy(),
                         2,
@@ -193,7 +212,7 @@ def main():
 
         # sample
         with torch.no_grad():
-            sample = torch.randn(8, FLAGS.ldim).to(device)
+            sample = torch.randn(16, FLAGS.ldim).to(device)
             sample = model.decode(sample).cpu()
             save_image(sample.numpy(), 2, f'results/sample_{epoch}')
 
