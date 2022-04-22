@@ -6,10 +6,10 @@ from matplotlib import pyplot as plt
 def draw():
     color = (0, 0, 0)
     color = [x / 255. for x in color]
-    size = 25
+    size = 64
     sample = np.ones((size, size, 3))
-    nbox = 1  # 15
-    scale = 3  # 30
+    nbox = 2  # 15
+    scale = 5  # 30
     center = np.random.normal(loc=size / 2, scale=scale, size=nbox)
     width = np.random.normal(loc=size / 4, scale=scale, size=nbox)
     height = np.random.normal(loc=size / 3, scale=scale, size=nbox)
@@ -28,8 +28,8 @@ def draw():
 
 
 def main():
-    nrow = 2
-    ncol = 2
+    nrow = 4
+    ncol = 4
     nplot = nrow * ncol
     name = 'box.png'
     fig, axes = plt.subplots(nrow, ncol)
