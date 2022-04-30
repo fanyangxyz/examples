@@ -19,17 +19,16 @@ import draw_box
 
 FLAGS = gflags.FLAGS
 
-gflags.DEFINE_float('lr', '1e-2', '')
-gflags.DEFINE_integer('batch_size', 24, '')
-gflags.DEFINE_integer('epochs', 30, '')
-gflags.DEFINE_integer('log_interval', 100, '')
+gflags.DEFINE_float('lr', '1e-3', '')
+gflags.DEFINE_integer('batch_size', 128, '')
+gflags.DEFINE_integer('epochs', 10, '')
+gflags.DEFINE_integer('log_interval', 50, '')
 gflags.DEFINE_boolean('cuda', False, '')
 gflags.DEFINE_integer('seed', 33, '')
-gflags.DEFINE_integer('ldim', 16, '')
+gflags.DEFINE_integer('ldim', 20, '')
 gflags.DEFINE_boolean('verbose', False, '')
 
-
-BOX_SIZE = 64
+BOX_SIZE = 28
 
 
 class CustomImageDataset(torch.utils.data.Dataset):
@@ -56,10 +55,10 @@ class VAE(nn.Module):
 
         self.encoder_model = nn.Sequential(
             nn.Conv2d(
-                in_channels=3, out_channels=6, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
+                in_channels=1, out_channels=6, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
                 in_channels=6, out_channels=12, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
-                in_channels=12, out_channels=12, kernel_size=3, stride=2), nn.ReLU(), nn.Conv2d(
-                    in_channels=12, out_channels=FLAGS.ldim, kernel_size=3, stride=2), nn.ReLU(), )
+                in_channels=12, out_channels=12, kernel_size=3, stride=1), nn.ReLU(), nn.Conv2d(
+                    in_channels=12, out_channels=FLAGS.ldim, kernel_size=3, stride=1), nn.ReLU(), )
         self.fc_mu = nn.LazyLinear(FLAGS.ldim)
         self.fc_logvar = nn.LazyLinear(FLAGS.ldim)
 
@@ -68,31 +67,30 @@ class VAE(nn.Module):
                 in_channels=FLAGS.ldim,
                 out_channels=12,
                 kernel_size=3,
-                stride=4),
+                stride=2),
             nn.ReLU(),
             nn.ConvTranspose2d(
                 in_channels=12,
                 out_channels=6,
                 kernel_size=3,
-                stride=3),
+                stride=2),
             nn.ReLU(),
             nn.ConvTranspose2d(
                 in_channels=6,
                 out_channels=3,
                 kernel_size=3,
-                stride=3),
+                stride=2),
             nn.ReLU(),
             nn.ConvTranspose2d(
                 in_channels=3,
-                out_channels=3,
+                out_channels=1,
                 kernel_size=3,
-                stride=3),
+                stride=2),
             nn.Sigmoid(),
         )
 
     def encode(self, x):
-        x_ncwh = x.permute(0, 3, 1, 2)
-        h = self.encoder_model(x_ncwh)
+        h = self.encoder_model(x)
         h_flatten = h.flatten(start_dim=1)
         if FLAGS.verbose:
             print('h flatten')
@@ -107,11 +105,10 @@ class VAE(nn.Module):
     def decode(self, z):
         z = z.view(-1, FLAGS.ldim, 1, 1)
         x_hat = self.decoder_model(z)
-        x_hat_nwhc = x_hat.permute(0, 2, 3, 1)
         if FLAGS.verbose:
             print('x hat')
             print(x_hat.shape)
-        x_cropped = x_hat_nwhc[:, :BOX_SIZE, :BOX_SIZE, :]
+        x_cropped = x_hat[:, :, :BOX_SIZE, :BOX_SIZE]
         return x_cropped
 
     def forward(self, x):
@@ -123,7 +120,7 @@ class VAE(nn.Module):
 
 # Reconstruction + KL divergence losses summed over all elements and batch
 def loss_function(recon_x, x, mu, logvar):
-    loss = F.binary_cross_entropy(recon_x, x, reduction='mean')
+    loss = F.binary_cross_entropy(recon_x, x, reduction='sum')
 
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
@@ -131,16 +128,16 @@ def loss_function(recon_x, x, mu, logvar):
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-    return loss + KLD * 0
+    return loss + KLD
 
 
 def save_image(sample, nrow, name):
     assert sample.dtype == 'float32', sample.dtype
-    sample = np.clip(sample, 0, 1)
+    #sample = np.clip(sample, 0, 1)
     ncol = len(sample) // nrow
     fig, axes = plt.subplots(nrow, ncol)
     for i, ax in enumerate(axes.flat):
-        ax.imshow(sample[i])
+        ax.imshow(sample[i], cmap='Greys', interpolation='nearest')
         ax.axis('off')
     plt.subplots_adjust(wspace=0, hspace=0)
     fig.savefig(name)
@@ -155,12 +152,14 @@ def main():
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 
     train_loader = torch.utils.data.DataLoader(
-        CustomImageDataset(None, None),
-        batch_size=FLAGS.batch_size,
-        shuffle=True,
-        **kwargs)
+        datasets.MNIST('../data', train=True, download=True,
+                       transform=transforms.ToTensor()),
+        batch_size=FLAGS.batch_size, shuffle=True, **kwargs)
     test_loader = torch.utils.data.DataLoader(
-        CustomImageDataset(None, None),
+        datasets.MNIST(
+            '../data',
+            train=False,
+            transform=transforms.ToTensor()),
         batch_size=FLAGS.batch_size,
         shuffle=True,
         **kwargs)
@@ -210,11 +209,11 @@ def main():
                     comparison = torch.cat(
                         [data[:n], recon_batch[:n]])
                     save_image(
-                        comparison.numpy(),
+                        comparison.permute(0, 2, 3, 1).numpy(),
                         2,
-                        f'results_box/reconstruction_{epoch}.png')
+                        f'results_mnist/reconstruction_{epoch}.png')
                     np.savez_compressed(
-                        f'results_box/reconstruction_{epoch}.npz',
+                        f'results_mnist/reconstruction_{epoch}.npz',
                         comparison.numpy())
 
         test_loss /= len(test_loader.dataset)
@@ -224,9 +223,10 @@ def main():
         with torch.no_grad():
             sample = torch.randn(64, FLAGS.ldim).to(device)
             sample = model.decode(sample).cpu()
-            save_image(sample.numpy(), 8, f'results_box/sample_{epoch}.png')
+            save_image(sample.permute(0, 2, 3, 1).numpy(), 8,
+                       f'results_mnist/sample_{epoch}.png')
             np.savez_compressed(
-                f'results_box/sample_{epoch}.npz',
+                f'results_mnist/sample_{epoch}.npz',
                 sample.numpy())
 
 
