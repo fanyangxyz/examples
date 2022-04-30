@@ -206,6 +206,9 @@ def main():
                         comparison.numpy(),
                         2,
                         f'results/reconstruction_{epoch}.png')
+                    np.savez_compressed(
+                        f'results/reconstruction_{epoch}.npz',
+                        comparison.numpy())
 
         test_loss /= len(test_loader.dataset)
         print('====> Test set loss: {:.4f}'.format(test_loss))
@@ -214,7 +217,8 @@ def main():
         with torch.no_grad():
             sample = torch.randn(16, FLAGS.ldim).to(device)
             sample = model.decode(sample).cpu()
-            save_image(sample.numpy(), 2, f'results/sample_{epoch}')
+            save_image(sample.numpy(), 2, f'results/sample_{epoch}.png')
+            np.savez_compressed(f'results/sample_{epoch}.npz', sample.numpy())
 
 
 if __name__ == "__main__":
